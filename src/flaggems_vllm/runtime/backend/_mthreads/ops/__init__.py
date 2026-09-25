@@ -45,8 +45,12 @@ from flaggems_vllm.runtime.backend._mthreads.ops.scaled_int8_quant import (
 from flaggems_vllm.runtime.backend._mthreads.ops.topk_softplus_sqrt import (
     topk_softplus_sqrt,
 )
+from flaggems_vllm.runtime.backend._mthreads.ops.w8a8_block_fp8_matmul import (
+    w8a8_block_fp8_matmul,
+)
 
 __all__ = [
+    "w8a8_block_fp8_matmul",
     "SUPPORTED_FP8_DTYPE",
     "flash_attn_varlen_func_w8a8_fp8",
     "gemma_rms_norm",

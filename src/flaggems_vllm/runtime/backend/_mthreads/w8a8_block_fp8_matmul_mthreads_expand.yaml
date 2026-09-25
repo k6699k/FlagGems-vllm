@@ -1,0 +1,151 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Expanded tuning spaces mapped to the MThreads generic kernel.
+# BLOCK_X/BLOCK_Y are the kernel's logical X/Y axes. Each dispatch entry has
+# its own LibTuner so general, swap-AB, split-K, and short-K never share cache.
+
+w8a8_block_fp8_mthreads_general:
+  - config:
+    param_map:
+      META:
+        BLOCK_X: block_x
+        BLOCK_Y: block_y
+        BLOCK_K: block_k
+        GROUP_X: group_x
+      num_stages: stages
+      num_warps: warps
+    block_x: [16, 64, 128]
+    block_y: [32, 128]
+    block_k: [128]
+    group_x: [16, 32, 64]
+    stages: [3, 4, 5]
+    warps: [4, 8]
+  - strategy:
+      M: default
+      N: default
+      K: default
+      stride_am: default
+      stride_ak: default
+      stride_bn: default
+      stride_bk: default
+      stride_asm: default
+      stride_ask: default
+      stride_bsn: default
+      stride_bsk: default
+      GROUP_N: default
+      GROUP_K: default
+      SWAP_AB: default
+      MIN_Y: default
+
+w8a8_block_fp8_mthreads_swap:
+  - config:
+    param_map:
+      META:
+        BLOCK_X: block_x
+        BLOCK_Y: block_y
+        BLOCK_K: block_k
+        GROUP_X: group_x
+      num_stages: stages
+      num_warps: warps
+    block_x: [32, 64, 128]
+    block_y: [4, 8, 16, 32]
+    block_k: [64, 128]
+    group_x: [1, 2, 4, 8, 16]
+    stages: [3, 4, 5]
+    warps: [2, 4, 8]
+  - strategy:
+      M: default
+      N: default
+      K: default
+      stride_am: default
+      stride_ak: default
+      stride_bn: default
+      stride_bk: default
+      stride_asm: default
+      stride_ask: default
+      stride_bsn: default
+      stride_bsk: default
+      GROUP_N: default
+      GROUP_K: default
+      SWAP_AB: default
+      MIN_Y: default
+
+w8a8_block_fp8_mthreads_splitk:
+  - config:
+    param_map:
+      META:
+        BLOCK_X: block_x
+        BLOCK_Y: block_y
+        BLOCK_K: block_k
+        GROUP_X: group_x
+        SPLIT_K: split_k
+      num_stages: stages
+      num_warps: warps
+    block_x: [32, 64, 128]
+    block_y: [4, 8, 16, 32]
+    block_k: [64, 128]
+    group_x: [1, 8]
+    split_k: [2, 4, 6, 8, 12, 16, 20]
+    stages: [2, 3, 4]
+    warps: [2, 4, 8]
+  - strategy:
+      M: default
+      N: default
+      K: default
+      stride_am: default
+      stride_ak: default
+      stride_bn: default
+      stride_bk: default
+      stride_asm: default
+      stride_ask: default
+      stride_bsn: default
+      stride_bsk: default
+      GROUP_N: default
+      GROUP_K: default
+      SWAP_AB: default
+      MIN_Y: default
+
+w8a8_block_fp8_mthreads_shortk:
+  - config:
+    param_map:
+      META:
+        BLOCK_X: block_x
+        BLOCK_Y: block_y
+        BLOCK_K: block_k
+        GROUP_X: group_x
+      num_stages: stages
+      num_warps: warps
+    block_x: [64]
+    block_y: [16, 32, 64]
+    block_k: [128]
+    group_x: [8]
+    stages: [3]
+    warps: [4, 8]
+  - strategy:
+      M: default
+      N: default
+      K: default
+      stride_am: default
+      stride_ak: default
+      stride_bn: default
+      stride_bk: default
+      stride_asm: default
+      stride_ask: default
+      stride_bsn: default
+      stride_bsk: default
+      GROUP_N: default
+      GROUP_K: default
+      SWAP_AB: default
+      MIN_Y: default
