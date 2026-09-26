@@ -193,6 +193,13 @@ w8a8_block_fp8_matmul_mthreads_tle:
 - META:
     BM: 16
     BN: 64
+    STAGES: 1
+    WS: false
+  num_warps: 4
+  num_stages: 1
+- META:
+    BM: 16
+    BN: 64
     STAGES: 2
     WS: true
   num_warps: 4
@@ -202,6 +209,13 @@ w8a8_block_fp8_matmul_mthreads_tle:
     BN: 64
     STAGES: 3
     WS: true
+  num_warps: 4
+  num_stages: 1
+- META:
+    BM: 32
+    BN: 64
+    STAGES: 1
+    WS: false
   num_warps: 4
   num_stages: 1
 - META:

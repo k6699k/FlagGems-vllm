@@ -56,7 +56,7 @@ EXPAND_CONFIG_FILENAME = os.path.normpath(
 
 
 def _tle_descriptor_shapes(args):
-    if args["K"] % 16 == 0:
+    if args.get("USE_TME", False):
         tile_k = args.get("TILE_K", 128)
         args["A"].block_shape = [max(16, args["BM"]), tile_k]
         args["B"].block_shape = [args["BN"], tile_k]
@@ -70,11 +70,15 @@ def _tle_configs():
 
 
 def _prune_tle_configs(configs, named_args, **kwargs):
-    block_m = 16 if named_args["M"] <= 16 else 64
+    block_m = 16 if named_args["M"] <= 16 else None
     return [
         c
         for c in configs
-        if max(16, c.kwargs["BM"]) == block_m
+        if (block_m is None or max(16, c.kwargs["BM"]) == block_m)
+        # Warp-specialized pipelines can fault during repeated MUSA graph
+        # execution. Keep the copy paths on unified-CTA pipelines, and tune
+        # their row tile so ragged/small M does not pay for a fixed BM=64.
+        and not c.kwargs["WS"]
         and (
             c.kwargs["WS"]
             or c.kwargs["BN"] == 64
@@ -95,11 +99,12 @@ def _tle_producer(
     K: tl.constexpr,
     BM: tl.constexpr,
     BN: tl.constexpr,
+    USE_TME: tl.constexpr,
     TILE_K: tl.constexpr = 128,
 ):
     for it in tl.range(0, tl.cdiv(K, TILE_K), num_stages=1):
         slot = writer.acquire(it)
-        if K % 16 == 0 and M % BM == 0 and N % BN == 0:
+        if USE_TME:
             tle.gpu.copy(A, slot.a, (BM, TILE_K), (pm * BM, it * TILE_K))
             tle.gpu.copy(B, slot.b, (BN, TILE_K), (pn * BN, it * TILE_K))
         else:
@@ -184,6 +189,7 @@ def _tle_consumer(
         "GROUP_N",
         "TILE_K",
         "HALF",
+        "USE_TME",
     ],
     strategy="default",
     prune_configs_by={"early_config_prune": _prune_tle_configs},
@@ -212,7 +218,9 @@ def _block_fp8_matmul_tle(
     GROUP_K: tl.constexpr = 128,
     GROUP_N: tl.constexpr = 128,
     TILE_K: tl.constexpr = 128,
+    USE_TME: tl.constexpr = False,
 ):
+    tl.static_assert(not WS, "MUSA graph execution requires the unified-CTA path")
     # SQMMA requires M tiles of at least 16. Keep this hardware constraint
     # explicit even if automatic block-size adjustment shrinks the candidate.
     TILE_M: tl.constexpr = max(16, BM)
@@ -276,7 +284,7 @@ def _block_fp8_matmul_tle(
                 ),
                 (
                     _tle_producer,
-                    (pipe.writer(), A, B, pm, pn, M, N, K, TILE_M, BN, TILE_K),
+                    (pipe.writer(), A, B, pm, pn, M, N, K, TILE_M, BN, USE_TME, TILE_K),
                 ),
             ],
             worker_num_warps=[4],
@@ -294,7 +302,7 @@ def _block_fp8_matmul_tle(
         acc = tl.zeros((TILE_M, BN), tl.float32)
         for it in tl.range(0, tl.cdiv(K, TILE_K), num_stages=1):
             slot = writer.acquire(it)
-            if K % 16 == 0 and M % BM == 0 and N % BN == 0:
+            if USE_TME:
                 tle.gpu.copy(A, slot.a, (TILE_M, TILE_K), (pm * TILE_M, it * TILE_K))
                 tle.gpu.copy(B, slot.b, (BN, TILE_K), (pn * BN, it * TILE_K))
             else:
@@ -322,8 +330,14 @@ def _block_fp8_matmul_tle(
             reader.release(it)
             scale_it = it * TILE_K // GROUP_K
             sa = tl.load(As + rm * SAM + scale_it * SAK, rm < M, other=0)
-            sb = tl.load(Bs + (pn * BN // GROUP_N) * SBN + scale_it * SBK)
-            acc += partial * (sa * sb)[:, None]
+            if BN <= GROUP_N and GROUP_N % BN == 0:
+                sb = tl.load(Bs + (pn * BN // GROUP_N) * SBN + scale_it * SBK)
+                acc += partial * (sa * sb)[:, None]
+            else:
+                sb = tl.load(
+                    Bs + (rn // GROUP_N) * SBN + scale_it * SBK, rn < N, other=0
+                )
+                acc += partial * sa[:, None] * sb[None, :]
         tl.store(
             C + rm[:, None] * N + rn[None, :],
             acc,
@@ -948,7 +962,8 @@ def w8a8_block_fp8_matmul(
                     (triton.cdiv(m * gemm_k, 1024) + triton.cdiv(n * gemm_k, 1024),)
                 ](a, B, packed, m, n, k, gemm_k, BLOCK=1024, num_warps=4)
                 gemm_a, gemm_b = packed[:m], packed[m:]
-            if gemm_k % 16 == 0 and m % 64 == 0 and n % 128 == 0:
+            use_tme = gemm_k % 16 == 0 and m % 64 == 0 and n % 128 == 0
+            if use_tme:
                 # Descriptor copies are safe only for complete BM/BN tiles.
                 ad = TensorDescriptor.from_tensor(gemm_a, [64, 128])
                 bd = TensorDescriptor.from_tensor(gemm_b, [64, 128])
@@ -976,6 +991,7 @@ def w8a8_block_fp8_matmul(
                 GROUP_N=group_n,
                 TILE_K=32 if group_k == 32 else (64 if group_k == 64 else 128),
                 HALF=prepare_half,
+                USE_TME=use_tme,
             )
             return c
         # Very narrow N with large M is a row-wise reduction problem. The
