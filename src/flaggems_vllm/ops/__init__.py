@@ -284,6 +284,11 @@ if _runtime.device.vendor_name == "hygon":
         "w8a8_block_int8_bmm",
     ]
 
+if _runtime.device.vendor_name == "metax":
+    from flaggems_vllm.runtime.backend._metax.ops import w8a8_block_int8_matmul
+
+    __all__.append("w8a8_block_int8_matmul")
+
 if _runtime.device.vendor_name == "thead":
     from flaggems_vllm.runtime.backend._thead.fused import attention as thead_attention
 

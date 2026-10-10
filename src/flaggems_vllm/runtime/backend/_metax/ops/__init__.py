@@ -32,6 +32,9 @@ from flaggems_vllm.runtime.backend._metax.ops.ple_state import ple_state_scatter
 from flaggems_vllm.runtime.backend._metax.ops.qsa import qwen4_store_qsa_kv_rows
 from flaggems_vllm.runtime.backend._metax.ops.qsa_mqa import qwen4_qsa_mqa_paged_dot
 from flaggems_vllm.runtime.backend._metax.ops.scaled_int8_quant import scaled_int8_quant
+from flaggems_vllm.runtime.backend._metax.ops.w8a8_block_int8_matmul import (
+    w8a8_block_int8_matmul,
+)
 
 __all__ = [
     "SUPPORTED_FP8_DTYPE",
@@ -43,6 +46,7 @@ __all__ = [
     "qwen4_qsa_mqa_paged_dot",
     "qwen4_compress_norm_mrope_store_groups",
     "scaled_int8_quant",
+    "w8a8_block_int8_matmul",
     "fused_experts_impl",
     "inplace_fused_experts",
     "outplace_fused_experts",
