@@ -35,6 +35,9 @@ from flaggems_vllm.runtime.backend._metax.ops.scaled_int8_quant import scaled_in
 from flaggems_vllm.runtime.backend._metax.ops.w8a8_block_int8_bmm import (
     w8a8_block_int8_bmm,
 )
+from flaggems_vllm.runtime.backend._metax.ops.w8a8_block_int8_matmul import (
+    w8a8_block_int8_matmul,
+)
 from flaggems_vllm.utils import triton_version_utils
 
 # A missing optional TLE extension must not disable the independent INT8 ops.
@@ -55,6 +58,7 @@ __all__ = [
     "qwen4_qsa_mqa_paged_dot",
     "qwen4_compress_norm_mrope_store_groups",
     "scaled_int8_quant",
+    "w8a8_block_int8_matmul",
     "fused_experts_impl",
     "inplace_fused_experts",
     "outplace_fused_experts",
