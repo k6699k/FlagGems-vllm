@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
+
 import pytest
 import torch
 
@@ -42,7 +44,10 @@ def _reference(a, b, a_scale, b_scale, block_n, block_k):
 
 
 @pytest.mark.w8a8_block_int8_matmul
-@pytest.mark.parametrize("shape", [(1, 65, 130), (7, 129, 257), (32, 64, 384)])
+@pytest.mark.parametrize(
+    "shape",
+    [(1, 65, 130), (7, 129, 257), (32, 64, 384), (7, 129, 4225)],
+)
 @pytest.mark.parametrize("output_dtype", [torch.float16, torch.bfloat16, torch.float32])
 def test_w8a8_block_int8_matmul(shape, output_dtype):
     m, n, k = shape
@@ -114,3 +119,56 @@ def test_w8a8_block_int8_rejects_invalid_inputs():
         flaggems_vllm.w8a8_block_int8_matmul(
             a[:, ::2], b[:, ::2], a_scale, b_scale, [128, 64], torch.float32
         )
+
+
+@pytest.mark.w8a8_block_int8_matmul
+@pytest.mark.parametrize(
+    "splits",
+    [2, 4, 8, 16],
+)
+@pytest.mark.parametrize("output_dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("group_n", [64])
+def test_w8a8_block_int8_splitk_tails(splits, output_dtype, group_n):
+    # Unused workspace slices remain NaN.  A correct reduction must exclude
+    # them instead of relying on zero initialization or a previous invocation.
+    backend = importlib.import_module(
+        f"flaggems_vllm.runtime.backend._{flaggems_vllm.vendor_name}"
+        ".ops.w8a8_block_int8_matmul"
+    )
+    m, n, k = 7, 129, 4225
+    group_k = 128
+    a = torch.randint(-127, 128, (m, k), device="cuda", dtype=torch.int8)
+    b = torch.randint(-127, 128, (n, k), device="cuda", dtype=torch.int8)
+    groups = (k + group_k - 1) // group_k
+    a_scale = torch.rand((m, groups), device="cuda") * 0.01
+    b_scale = torch.rand(((n + group_n - 1) // group_n, groups), device="cuda") * 0.01
+    workspace = torch.full(
+        (backend._MAX_SPLITS.value * m * n + 1,), float("nan"), device="cuda"
+    )
+    output = torch.empty((m, n), device="cuda", dtype=output_dtype)
+    backend._w8a8_block_int8_kernel_splitk.jit_function[((n + 31) // 32, splits)](
+        a,
+        b,
+        workspace,
+        output,
+        a_scale,
+        b_scale,
+        m,
+        n,
+        k,
+        GROUP_N=group_n,
+        GROUP_K=group_k,
+        BLOCK_M=16,
+        BLOCK_N=32,
+        GROUP_M=4,
+        SPLITS=splits,
+        SWAP=True,
+        num_warps=2,
+        num_stages=2,
+    )
+    backend._w8a8_block_int8_reduce_splitk[((m * n + 255) // 256,)](
+        workspace, output, m, n, 256, num_warps=4
+    )
+    expected = _reference(a, b, a_scale, b_scale, group_n, group_k).to(output_dtype)
+    tolerance = 1e-3 if output_dtype == torch.float32 else 2e-2
+    torch.testing.assert_close(output.cpu(), expected, atol=tolerance, rtol=tolerance)

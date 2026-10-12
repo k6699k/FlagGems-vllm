@@ -235,6 +235,20 @@ def _w8a8_block_int8_gemv_kernel(
     tl.store(C + offs_n, result, mask=mask_n)
 
 
+def _prune_matmul_configs(configs, named_args, **kwargs):
+    result = []
+    for config in configs:
+        bm, bn = config.kwargs["BLOCK_M"], config.kwargs["BLOCK_N"]
+        if bm * bn > 16384:
+            continue
+        # Unaligned INT8 rows can exceed C550's private-memory limit with
+        # larger layouts.  The compact tiles preserve the tail path.
+        if named_args["K"] % 16 and (bm != 16 or bn > 64):
+            continue
+        result.append(config)
+    return result
+
+
 @libentry()
 @libtuner(
     configs=runtime.get_tuned_config("w8a8_block_int8_matmul_metax"),
@@ -244,6 +258,7 @@ def _w8a8_block_int8_gemv_kernel(
     rep=20,
     flagtune_op_name="w8a8_block_int8_matmul",
     flagtune_expand_op_name="w8a8_block_int8_matmul",
+    prune_configs_by={"early_config_prune": _prune_matmul_configs},
 )
 @triton.jit
 def _w8a8_block_int8_kernel_general(
@@ -312,6 +327,7 @@ def _w8a8_block_int8_kernel_general(
     rep=20,
     flagtune_op_name="w8a8_block_int8_matmul",
     flagtune_expand_op_name="w8a8_block_int8_swap",
+    prune_configs_by={"early_config_prune": _prune_matmul_configs},
 )
 @triton.jit
 def _w8a8_block_int8_kernel_swap(
@@ -422,6 +438,134 @@ def _w8a8_block_int8_gemv_kernel_tuned(
     )
 
 
+# The last workspace element records the active split count.  The reduction
+# consumes only initialized slices, even when LibTuner selects fewer splits.
+_MAX_SPLITS = tl.constexpr(16)
+
+
+@triton.jit
+def _w8a8_block_int8_reduce_splitk(
+    P, C, M: tl.constexpr, N: tl.constexpr, BLOCK: tl.constexpr
+):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    split = tl.arange(0, _MAX_SPLITS)
+    active_splits = tl.load(P + tl.cast(M, tl.int64) * N * _MAX_SPLITS).to(tl.int32)
+    partial = tl.load(
+        P + split[:, None].to(tl.int64) * M * N + offsets[None, :],
+        (split[:, None] < active_splits) & (offsets[None, :] < M * N),
+        other=0.0,
+    )
+    tl.store(C + offsets, tl.sum(partial, axis=0), offsets < M * N)
+
+
+def _splitk_post_hook(args, exception):
+    # Include reduction in candidate timings rather than tuning partial GEMM
+    # alone.  LibEntry launches the selected partial kernel on cache hits;
+    # the public wrapper launches the same reduction after it.
+    if exception is None:
+        _w8a8_block_int8_reduce_splitk[(triton.cdiv(args["M"] * args["N"], 256),)](
+            args["P"], args["C"], args["M"], args["N"], 256, num_warps=4
+        )
+
+
+def _prune_splitk_configs(configs, named_args, **kwargs):
+    # An unaligned INT8 row stride expands the larger dot layouts into
+    # scalar loads and can exceed C550's 4 KiB/thread private-memory limit.
+    # The compact swap layout remains valid for these K tails.
+    if named_args["K"] % 16:
+        return [
+            config
+            for config in configs
+            if config.kwargs["BLOCK_M"] == 16
+            and config.kwargs["BLOCK_N"] == 32
+            and config.kwargs["SWAP"]
+        ]
+    return configs
+
+
+@libentry()
+@libtuner(
+    configs=runtime.get_tuned_config("w8a8_block_int8_splitk_metax"),
+    key=["M", "N", "K", "GROUP_N", "GROUP_K"],
+    strategy="default",
+    warmup=5,
+    rep=20,
+    post_hook=_splitk_post_hook,
+    prune_configs_by={"early_config_prune": _prune_splitk_configs},
+    flagtune_op_name="w8a8_block_int8_matmul",
+    flagtune_expand_op_name="w8a8_block_int8_splitk",
+)
+@triton.jit
+def _w8a8_block_int8_kernel_splitk(
+    A,
+    B,
+    P,
+    C,
+    As,
+    Bs,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    GROUP_N: tl.constexpr,
+    GROUP_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    SPLITS: tl.constexpr,
+    SWAP: tl.constexpr,
+):
+    groups = tl.cdiv(K, GROUP_K)
+    _w8a8_block_int8_kernel_core(
+        A,
+        B,
+        P,
+        As,
+        Bs,
+        M,
+        N,
+        K,
+        K,
+        1,
+        1,
+        K,
+        N,
+        1,
+        groups,
+        1,
+        groups,
+        1,
+        GROUP_N=GROUP_N,
+        GROUP_K=GROUP_K,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=GROUP_K,
+        GROUP_M=GROUP_M,
+        SWAP=SWAP,
+        SPLITS=SPLITS,
+    )
+    if tl.program_id(0) == 0 and tl.program_id(1) == 0:
+        tl.store(P + tl.cast(M, tl.int64) * N * _MAX_SPLITS, SPLITS)
+
+
+def _splitk_matmul(A, B, As, Bs, M, N, K, group_n, group_k, output_dtype):
+    C = torch.empty(A.shape[:-1] + (N,), device=A.device, dtype=output_dtype)
+    P = torch.empty(
+        (_MAX_SPLITS.value * M * N + 1,), device=A.device, dtype=torch.float32
+    )
+    grid = lambda meta: (
+        triton.cdiv(M, meta["BLOCK_M"]) * triton.cdiv(N, meta["BLOCK_N"]),
+        meta["SPLITS"],
+    )
+    with torch_device_fn.device(A.device):
+        _w8a8_block_int8_kernel_splitk[grid](
+            A, B, P, C, As, Bs, M, N, K, GROUP_N=group_n, GROUP_K=group_k
+        )
+        _w8a8_block_int8_reduce_splitk[(triton.cdiv(M * N, 256),)](
+            P, C, M, N, 256, num_warps=4
+        )
+    return C
+
+
 _last_validated_signature = None
 _last_validation_key = None
 
@@ -527,8 +671,14 @@ def w8a8_block_int8_matmul(
         raise ValueError("Bs has an invalid block-scale shape")
     if M == 0 or N == 0:
         return A.new_empty(A.shape[:-1] + (N,), dtype=output_dtype)
+    # Long reductions with few output tiles benefit from additional CTAs.
+    # Bound the FP32 workspace to 4 MiB and keep well-occupied GEMMs on the
+    # original path.  Split count and tile layout are selected by LibTuner.
+    if group_k == 128 and K >= 4096 and M <= 128 and N <= 1536 and M * N <= 65536:
+        return _splitk_matmul(A, B, As, Bs, M, N, K, group_n, group_k, output_dtype)
+    expand = runtime.flagtune_enabled("w8a8_block_int8_matmul")
     skinny_swap = 2 <= M <= 64 and N <= 1536 and 2304 < K <= 8192
-    if M == 1 and K <= 2304 and group_k == 128:
+    if not expand and M == 1 and K <= 2304 and group_k == 128:
         C = A.new_empty(A.shape[:-1] + (N,), dtype=output_dtype)
         # A 128-wide tile keeps the MetaX INT8 MMA path in its native
         # 4-warp layout.  The 256-wide variant needs a larger shared-memory
@@ -558,7 +708,7 @@ def w8a8_block_int8_matmul(
             num_stages=2,
         )
         return C
-    if group_k == 128 and ((M <= 16 and K <= 2304) or skinny_swap):
+    if not expand and group_k == 128 and ((M <= 16 and K <= 2304) or skinny_swap):
         C = A.new_empty(A.shape[:-1] + (N,), dtype=output_dtype)
         block_n = 16 if N <= 16 else 32
         _w8a8_block_int8_kernel_core[(triton.cdiv(M, 16) * triton.cdiv(N, block_n), 1)](
@@ -592,7 +742,7 @@ def w8a8_block_int8_matmul(
             num_stages=2,
         )
         return C
-    if M >= 17 and K <= 2304 and group_k == 128:
+    if not expand and M >= 17 and K <= 2304 and group_k == 128:
         C = A.new_empty(A.shape[:-1] + (N,), dtype=output_dtype)
         _w8a8_block_int8_kernel_core[(triton.cdiv(M, 64) * triton.cdiv(N, 128), 1)](
             A,

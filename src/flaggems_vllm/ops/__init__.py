@@ -300,8 +300,9 @@ if _runtime.device.vendor_name == "hygon":
     ]
 
 if _runtime.device.vendor_name == "metax":
-    from flaggems_vllm.runtime.backend._metax.ops import w8a8_block_int8_matmul
+    from flaggems_vllm.runtime.backend._metax import ops as metax_ops
 
+    w8a8_block_int8_matmul = metax_ops.w8a8_block_int8_matmul
     __all__.append("w8a8_block_int8_matmul")
 
 if _runtime.device.vendor_name == "thead":
