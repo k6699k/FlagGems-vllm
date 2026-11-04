@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import importlib
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -22,16 +23,23 @@ import flaggems_vllm
 from . import accuracy_utils as utils
 from .conftest import QUICK_MODE
 
+IS_INT8 = flaggems_vllm.vendor_name == "thead"
 OUTPUT_DTYPES = (
-    [torch.float32] if QUICK_MODE else [torch.float16, torch.bfloat16, torch.float32]
+    ([torch.float32] if QUICK_MODE else [torch.float16, torch.bfloat16, torch.float32])
+    if IS_INT8
+    else [torch.float16]
 )
-
-INT8_MNK_SHAPES = [
-    (1, 65, 130),
-    (7, 129, 257),
-    (32, 64, 384),
-    (7, 129, 4225),
-]
+MNK_SHAPES = (
+    [(1, 65, 130), (7, 129, 257), (32, 64, 384), (7, 129, 4225)]
+    if IS_INT8
+    else [
+        (128, 256, 512),
+        (64, 128, 128),
+        (256, 256, 256),
+        (83, 7748, 3884),
+        (84, 7168, 3884),
+    ]
+)
 
 # Retain INT8 absolute tolerances without scaling them by K. The common
 # assertion supplies the relative tolerance for each output dtype.
@@ -61,6 +69,16 @@ def _make_inputs(m, n, k, dtype, block_size=(128, 128), scale_offset=0.0):
 
 
 def _reference(a, b, a_scale, b_scale, block_n, block_k):
+    if a.dtype != torch.int8:
+        # Expand block scales without changing the FP8 reference's scale-before-dot order.
+        k = a.shape[1]
+        n = b.shape[0]
+        a_scale = a_scale.float().repeat_interleave(block_k, dim=1)[:, :k]
+        b_scale = b_scale.float().repeat_interleave(block_n, dim=0)
+        b_scale = b_scale.repeat_interleave(block_k, dim=1)[:n, :k]
+        result = (a.float() * a_scale) @ (b.float() * b_scale).T
+        return utils.to_reference(result, True)
+
     result = torch.zeros((a.shape[0], b.shape[0]), device="cpu", dtype=torch.float32)
     a_cpu = a.cpu().float()
     b_cpu = b.cpu().float()
@@ -80,25 +98,48 @@ def _reference(a, b, a_scale, b_scale, block_n, block_k):
 
 @pytest.mark.w8a8_block_matmul
 @pytest.mark.skipif(
-    flaggems_vllm.vendor_name != "thead", reason="Backend input precision differs"
+    flaggems_vllm.vendor_name not in ("thead", "nvidia", "mthreads"),
+    reason="No W8A8 block matmul backend",
 )
-@pytest.mark.parametrize("M,N,K", INT8_MNK_SHAPES)
+@pytest.mark.parametrize("M,N,K", MNK_SHAPES)
 @pytest.mark.parametrize("output_dtype", OUTPUT_DTYPES)
-def test_w8a8_block_matmul_int8(M, N, K, output_dtype):
+def test_w8a8_block_matmul(M, N, K, output_dtype):
+    if not hasattr(flaggems_vllm, "w8a8_block_matmul"):
+        pytest.skip("W8A8 block matmul is unavailable on this architecture")
+    if IS_INT8:
+        dtype = torch.int8
+    elif flaggems_vllm.vendor_name == "mthreads":
+        if hasattr(torch, "float8_e4m3fn"):
+            dtype = torch.float8_e4m3fn
+        else:
+            dtype = torch.float32
+    else:
+        if not torch.cuda.is_available():
+            pytest.skip("w8a8_block_fp8_matmul test requires CUDA or mthreads")
+        major, _ = torch.cuda.get_device_capability()
+        if major > 8:
+            dtype = torch.float8_e4m3fn
+        elif major == 8:
+            dtype = torch.float8_e5m2
+        else:
+            dtype = torch.float32
+
     block_n, block_k = 128, 128
     block_size = [block_n, block_k]
-    A, B, As, Bs = _make_inputs(M, N, K, torch.int8, block_size)
-
-    ref_out = _reference(A, B, As, Bs, block_n, block_k).to(output_dtype)
-    res_out = flaggems_vllm.w8a8_block_matmul(
-        A, B, As, Bs, block_size, output_dtype=output_dtype
+    A, B, As, Bs = _make_inputs(
+        M, N, K, dtype, block_size, scale_offset=0.0 if IS_INT8 else 0.005
     )
+    ref_out = _reference(A, B, As, Bs, block_n, block_k).to(output_dtype)
+    with nullcontext() if IS_INT8 else flaggems_vllm.use_gems():
+        res_out = flaggems_vllm.w8a8_block_matmul(
+            A, B, As, Bs, block_size, output_dtype=output_dtype
+        )
     utils.gems_assert_close(
-        res_out.cpu(),
+        res_out.cpu() if IS_INT8 else res_out,
         ref_out,
         dtype=output_dtype,
-        reduce_dim=1,
-        atol=INT8_ATOL[output_dtype],
+        reduce_dim=1 if IS_INT8 else K,
+        atol=INT8_ATOL[output_dtype] if IS_INT8 else 1e-4,
     )
 
 
@@ -213,77 +254,3 @@ def test_w8a8_block_int8_splitk_tails(splits, output_dtype, group_n):
         reduce_dim=1,
         atol=INT8_ATOL[output_dtype],
     )
-
-
-FP8_MNK_SHAPES = [
-    (128, 256, 512),
-    (64, 128, 128),
-    (256, 256, 256),
-    (83, 7748, 3884),
-    (84, 7168, 3884),
-]
-
-
-@pytest.mark.w8a8_block_matmul
-@pytest.mark.skipif(
-    flaggems_vllm.vendor_name not in ("nvidia", "mthreads"),
-    reason="Backend input precision differs",
-)
-@pytest.mark.parametrize("M,N,K", FP8_MNK_SHAPES)
-def test_w8a8_block_matmul_fp8(M, N, K):
-    if not hasattr(flaggems_vllm, "w8a8_block_matmul"):
-        pytest.skip("W8A8 block matmul is unavailable on this architecture")
-    if flaggems_vllm.vendor_name == "mthreads":
-        if hasattr(torch, "float8_e4m3fn"):
-            dtype = torch.float8_e4m3fn
-        else:
-            dtype = torch.float32
-    else:
-        if not torch.cuda.is_available():
-            pytest.skip("w8a8_block_fp8_matmul test requires CUDA or mthreads")
-        major, _ = torch.cuda.get_device_capability()
-        if major > 8:
-            dtype = torch.float8_e4m3fn
-        elif major == 8:
-            dtype = torch.float8_e5m2
-        else:
-            dtype = torch.float32
-
-    block_n, block_k = 128, 128
-    block_size = [block_n, block_k]
-    A, B, As, Bs = _make_inputs(M, N, K, dtype, block_size, scale_offset=0.005)
-    num_k_groups = As.shape[1]
-    num_n_groups = Bs.shape[0]
-
-    A_ref = A.to(torch.float32)
-    B_ref = B.to(torch.float32)
-    As_ref = As.to(torch.float32)
-    Bs_ref = Bs.to(torch.float32)
-
-    A_scaled = torch.zeros_like(A_ref)
-    for k_group in range(num_k_groups):
-        k_start = k_group * block_k
-        k_end = min(k_start + block_k, K)
-        scale = As_ref[:, k_group : k_group + 1]
-        A_scaled[:, k_start:k_end] = A_ref[:, k_start:k_end] * scale
-
-    B_scaled = torch.zeros_like(B_ref)
-    for n_group in range(num_n_groups):
-        n_start = n_group * block_n
-        n_end = min(n_start + block_n, N)
-        for k_group in range(num_k_groups):
-            k_start = k_group * block_k
-            k_end = min(k_start + block_k, K)
-            scale = Bs_ref[n_group, k_group]
-            B_scaled[n_start:n_end, k_start:k_end] = (
-                B_ref[n_start:n_end, k_start:k_end] * scale
-            )
-
-    ref_out = torch.matmul(A_scaled, B_scaled.T)
-    ref_out = utils.to_reference(ref_out, True)
-    with flaggems_vllm.use_gems():
-        res_out = flaggems_vllm.w8a8_block_matmul(
-            A, B, As, Bs, block_size, output_dtype=torch.float16
-        )
-    ref_out_fp16 = ref_out.to(torch.float16)
-    utils.gems_assert_close(res_out, ref_out_fp16, dtype=torch.float16, reduce_dim=K)
