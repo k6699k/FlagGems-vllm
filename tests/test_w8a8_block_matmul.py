@@ -29,17 +29,17 @@ OUTPUT_DTYPES = (
     if IS_INT8
     else [torch.float16]
 )
-MNK_SHAPES = (
-    [(1, 65, 130), (7, 129, 257), (32, 64, 384), (7, 129, 4225)]
-    if IS_INT8
-    else [
-        (128, 256, 512),
-        (64, 128, 128),
-        (256, 256, 256),
-        (83, 7748, 3884),
-        (84, 7168, 3884),
-    ]
-)
+MNK_SHAPES = [
+    (1, 65, 130),
+    (7, 129, 257),
+    (32, 64, 384),
+    (7, 129, 4225),
+    (128, 256, 512),
+    (64, 128, 128),
+    (256, 256, 256),
+    (83, 7748, 3884),
+    (84, 7168, 3884),
+]
 
 # Retain INT8 absolute tolerances without scaling them by K. The common
 # assertion supplies the relative tolerance for each output dtype.
