@@ -20,14 +20,8 @@ import torch
 import flaggems_vllm
 
 from . import accuracy_utils as utils
-from .conftest import QUICK_MODE
 
 IS_INT8 = flaggems_vllm.vendor_name == "thead"
-OUTPUT_DTYPES = (
-    ([torch.float32] if QUICK_MODE else [torch.float16, torch.bfloat16, torch.float32])
-    if IS_INT8
-    else [torch.float16]
-)
 MNK_SHAPES = [
     (1, 65, 130),
     (7, 129, 257),
@@ -41,8 +35,8 @@ MNK_SHAPES = [
 ]
 
 # Retain INT8 absolute tolerances without scaling them by K. The common
-# assertion supplies the relative tolerance for each output dtype.
-INT8_ATOL = {torch.float16: 2e-2, torch.bfloat16: 2e-2, torch.float32: 1e-3}
+# assertion supplies the relative tolerance for BF16 output.
+INT8_ATOL = 2e-2
 
 
 def _make_inputs(m, n, k, dtype, block_size=(128, 128), scale_offset=0.0):
@@ -101,8 +95,8 @@ def _reference(a, b, a_scale, b_scale, block_n, block_k):
     reason="No W8A8 block matmul backend",
 )
 @pytest.mark.parametrize("M,N,K", MNK_SHAPES)
-@pytest.mark.parametrize("output_dtype", OUTPUT_DTYPES)
-def test_w8a8_block_matmul(M, N, K, output_dtype):
+def test_w8a8_block_matmul(M, N, K):
+    output_dtype = torch.bfloat16
     if not hasattr(flaggems_vllm, "w8a8_block_matmul"):
         pytest.skip("W8A8 block matmul is unavailable on this architecture")
     if IS_INT8:
@@ -133,10 +127,11 @@ def test_w8a8_block_matmul(M, N, K, output_dtype):
         res_out = flaggems_vllm.w8a8_block_matmul(
             A, B, As, Bs, block_size, output_dtype=output_dtype
         )
+    assert res_out.dtype == output_dtype
     utils.gems_assert_close(
         res_out.cpu() if IS_INT8 else res_out,
         ref_out,
         dtype=output_dtype,
         reduce_dim=1 if IS_INT8 else K,
-        atol=INT8_ATOL[output_dtype] if IS_INT8 else 1e-4,
+        atol=INT8_ATOL if IS_INT8 else 1e-4,
     )

@@ -115,7 +115,7 @@ class W8A8BlockMatmulBenchmark(base.Benchmark):
                 + 0.005
             ).contiguous()
 
-            yield A, B, As, Bs, self.block_size[:], torch.float16
+            yield A, B, As, Bs, self.block_size[:], torch.bfloat16
 
     def get_tflops(self, op, *args, **kwargs):
         A, B = args[0], args[1]
