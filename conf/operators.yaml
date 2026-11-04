@@ -1500,7 +1500,7 @@ ops:
     stages:
       - beta: '5.3'
   - id: w8a8_block_matmul
-    description: Block-scaled W8A8 matrix multiplication; FP8 on NVIDIA Hopper and MThreads, INT8 on THead.
+    description: Matrix multiplication with block-wise scaled INT8 or FP8 activations and weights.
     for:
       - w8a8_block_matmul
     labels:
