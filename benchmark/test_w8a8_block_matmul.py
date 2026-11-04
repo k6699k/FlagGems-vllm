@@ -32,97 +32,6 @@ except Exception:
     VLLM_W8A8_BLOCK_INT8_AVAILABLE = False
 
 
-W8A8_BLOCK_INT8_MNK_SHAPES = [
-    (64, 128, 128),
-    (128, 256, 512),
-    (1, 4096, 7168),
-    (16, 4096, 7168),
-    (64, 4096, 7168),
-    (83, 7748, 3884),
-    (84, 7168, 3884),
-]
-
-W8A8_BLOCK_INT8_BLOCK_SIZE = [128, 128]
-
-
-def rand_int8_tensor(shape, device, dtype):
-    iinfo = torch.iinfo(dtype)
-    return torch.randint(iinfo.min, iinfo.max + 1, shape, device=device, dtype=dtype)
-
-
-class W8A8BlockINT8MatmulBenchmark(base.Benchmark):
-    DEFAULT_METRICS = consts.DEFAULT_METRICS[:] + ["tflops"]
-
-    def __init__(self, *args, block_size=None, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        if block_size is None:
-            self.block_size = W8A8_BLOCK_INT8_BLOCK_SIZE[:]
-        else:
-            self.block_size = list(block_size)
-
-        self.shape_desc = "M, N, K"
-
-    def set_shapes(self, shape_file_path=None):
-        self.shapes = W8A8_BLOCK_INT8_MNK_SHAPES[:]
-        self.shape_desc = "M, N, K"
-
-    def get_input_iter(self, dtype) -> Generator:
-        if dtype is None:
-            raise RuntimeError("w8a8_block_int8_matmul benchmark requires INT8 inputs")
-
-        block_n, block_k = self.block_size
-        for m, n, k in self.shapes:
-            num_k_groups = (k + block_k - 1) // block_k
-            num_n_groups = (n + block_n - 1) // block_n
-
-            A = rand_int8_tensor((m, k), self.device, dtype).contiguous()
-            B = rand_int8_tensor((n, k), self.device, dtype).contiguous()
-            As = (
-                0.01
-                * torch.rand((m, num_k_groups), dtype=torch.float32, device=self.device)
-                + 0.005
-            ).contiguous()
-            Bs = (
-                0.01
-                * torch.rand(
-                    (num_n_groups, num_k_groups),
-                    dtype=torch.float32,
-                    device=self.device,
-                )
-                + 0.005
-            ).contiguous()
-
-            yield A, B, As, Bs, self.block_size[:], torch.float16
-
-    def get_tflops(self, op, *args, **kwargs):
-        A, B = args[0], args[1]
-        m, k = A.shape
-        n = B.shape[0]
-        return 2 * m * n * k
-
-
-@pytest.mark.w8a8_block_matmul
-@pytest.mark.skipif(
-    flaggems_vllm.vendor_name != "thead", reason="Backend input precision differs"
-)
-@pytest.mark.skipif(
-    not VLLM_W8A8_BLOCK_INT8_AVAILABLE,
-    reason="w8a8_block_int8_matmul benchmark requires vLLM baseline operator",
-)
-def test_perf_w8a8_block_int8_matmul():
-    if not hasattr(flaggems_vllm, "w8a8_block_matmul"):
-        pytest.skip("w8a8_block_int8_matmul is not included on this backend")
-
-    bench = W8A8BlockINT8MatmulBenchmark(
-        op_name="w8a8_block_matmul",
-        torch_op=vllm_w8a8_block_int8_matmul,
-        gems_op=flaggems_vllm.w8a8_block_matmul,
-        dtypes=[torch.int8],
-    )
-    bench.run()
-
-
 try:
     from vllm.model_executor.layers.quantization.utils.fp8_utils import (
         w8a8_triton_block_scaled_mm as vllm_w8a8_triton_block_scaled_mm,
@@ -134,7 +43,7 @@ except Exception:
     VLLM_W8A8_BLOCK_FP8_AVAILABLE = False
 
 
-W8A8_BLOCK_FP8_MNK_SHAPES = [
+W8A8_BLOCK_MNK_SHAPES = [
     (64, 128, 128),
     (128, 256, 512),
     (1, 4096, 7168),
@@ -144,10 +53,15 @@ W8A8_BLOCK_FP8_MNK_SHAPES = [
     (84, 7168, 3884),
 ]
 
-W8A8_BLOCK_FP8_BLOCK_SIZE = [128, 128]
+W8A8_BLOCK_SIZE = [128, 128]
 
 
-def rand_fp8_tensor(shape, device, dtype):
+def rand_quantized_tensor(shape, device, dtype):
+    if dtype == torch.int8:
+        iinfo = torch.iinfo(dtype)
+        return torch.randint(
+            iinfo.min, iinfo.max + 1, shape, device=device, dtype=dtype
+        )
     finfo = torch.finfo(dtype)
     return (
         torch.randn(shape, device=device, dtype=torch.float32)
@@ -156,27 +70,27 @@ def rand_fp8_tensor(shape, device, dtype):
     )
 
 
-class W8A8BlockFP8MatmulBenchmark(base.Benchmark):
+class W8A8BlockMatmulBenchmark(base.Benchmark):
     DEFAULT_METRICS = consts.DEFAULT_METRICS[:] + ["tflops"]
 
     def __init__(self, *args, block_size=None, **kwargs):
         super().__init__(*args, **kwargs)
 
         if block_size is None:
-            self.block_size = W8A8_BLOCK_FP8_BLOCK_SIZE[:]
+            self.block_size = W8A8_BLOCK_SIZE[:]
         else:
             self.block_size = list(block_size)
 
         self.shape_desc = "M, N, K"
 
     def set_shapes(self, shape_file_path=None):
-        self.shapes = W8A8_BLOCK_FP8_MNK_SHAPES[:]
+        self.shapes = W8A8_BLOCK_MNK_SHAPES[:]
         self.shape_desc = "M, N, K"
 
     def get_input_iter(self, dtype) -> Generator:
         if dtype is None:
             raise RuntimeError(
-                "w8a8_block_fp8_matmul benchmark requires CUDA device with FP8 support"
+                "W8A8 block matmul benchmark requires a supported input dtype"
             )
 
         block_n, block_k = self.block_size
@@ -184,8 +98,8 @@ class W8A8BlockFP8MatmulBenchmark(base.Benchmark):
             num_k_groups = (k + block_k - 1) // block_k
             num_n_groups = (n + block_n - 1) // block_n
 
-            A = rand_fp8_tensor((m, k), self.device, dtype).contiguous()
-            B = rand_fp8_tensor((n, k), self.device, dtype).contiguous()
+            A = rand_quantized_tensor((m, k), self.device, dtype).contiguous()
+            B = rand_quantized_tensor((n, k), self.device, dtype).contiguous()
             As = (
                 0.01
                 * torch.rand((m, num_k_groups), dtype=torch.float32, device=self.device)
@@ -212,25 +126,29 @@ class W8A8BlockFP8MatmulBenchmark(base.Benchmark):
 
 @pytest.mark.w8a8_block_matmul
 @pytest.mark.skipif(
-    flaggems_vllm.vendor_name not in ("nvidia", "mthreads"),
-    reason="Backend input precision differs",
+    flaggems_vllm.vendor_name not in ("thead", "nvidia", "mthreads"),
+    reason="No W8A8 block matmul backend",
 )
-@pytest.mark.skipif(
-    not VLLM_W8A8_BLOCK_FP8_AVAILABLE,
-    reason="w8a8_block_fp8_matmul benchmark requires vLLM baseline operator",
-)
-def test_perf_w8a8_block_fp8_matmul():
+def test_perf_w8a8_block_matmul():
     if not hasattr(flaggems_vllm, "w8a8_block_matmul"):
         pytest.skip("W8A8 block matmul is unavailable on this architecture")
-    if len(consts.FP8_DTYPES) == 0:
-        pytest.skip(
-            "w8a8_block_fp8_matmul benchmark requires CUDA device with FP8 support"
-        )
+    if flaggems_vllm.vendor_name == "thead":
+        if not VLLM_W8A8_BLOCK_INT8_AVAILABLE:
+            pytest.skip("W8A8 block matmul benchmark requires the vLLM INT8 baseline")
+        torch_op = vllm_w8a8_block_int8_matmul
+        dtypes = [torch.int8]
+    else:
+        if not VLLM_W8A8_BLOCK_FP8_AVAILABLE:
+            pytest.skip("W8A8 block matmul benchmark requires the vLLM FP8 baseline")
+        if not consts.FP8_DTYPES:
+            pytest.skip("W8A8 block matmul benchmark requires FP8 support")
+        torch_op = vllm_w8a8_triton_block_scaled_mm
+        dtypes = consts.FP8_DTYPES
 
-    bench = W8A8BlockFP8MatmulBenchmark(
+    bench = W8A8BlockMatmulBenchmark(
         op_name="w8a8_block_matmul",
-        torch_op=vllm_w8a8_triton_block_scaled_mm,
+        torch_op=torch_op,
         gems_op=flaggems_vllm.w8a8_block_matmul,
-        dtypes=consts.FP8_DTYPES,
+        dtypes=dtypes,
     )
     bench.run()

@@ -38,6 +38,28 @@ INT8_MNK_SHAPES = [
 INT8_ATOL = {torch.float16: 2e-2, torch.bfloat16: 2e-2, torch.float32: 1e-3}
 
 
+def _make_inputs(m, n, k, dtype, block_size=(128, 128), scale_offset=0.0):
+    device = flaggems_vllm.device
+    block_n, block_k = block_size
+    if dtype == torch.int8:
+        a = torch.randint(-127, 128, (m, k), device=device, dtype=dtype)
+        b = torch.randint(-127, 128, (n, k), device=device, dtype=dtype)
+    else:
+        a = torch.randn((m, k), device=device).to(dtype)
+        b = torch.randn((n, k), device=device).to(dtype)
+    k_groups = (k + block_k - 1) // block_k
+    n_groups = (n + block_n - 1) // block_n
+    a_scale = (
+        torch.rand((m, k_groups), device=device, dtype=torch.float32) * 0.01
+        + scale_offset
+    )
+    b_scale = (
+        torch.rand((n_groups, k_groups), device=device, dtype=torch.float32) * 0.01
+        + scale_offset
+    )
+    return a, b, a_scale, b_scale
+
+
 def _reference(a, b, a_scale, b_scale, block_n, block_k):
     result = torch.zeros((a.shape[0], b.shape[0]), device="cpu", dtype=torch.float32)
     a_cpu = a.cpu().float()
@@ -63,20 +85,9 @@ def _reference(a, b, a_scale, b_scale, block_n, block_k):
 @pytest.mark.parametrize("M,N,K", INT8_MNK_SHAPES)
 @pytest.mark.parametrize("output_dtype", OUTPUT_DTYPES)
 def test_w8a8_block_matmul_int8(M, N, K, output_dtype):
-    device = flaggems_vllm.device
     block_n, block_k = 128, 128
     block_size = [block_n, block_k]
-
-    A = torch.randint(-127, 128, (M, K), device=device, dtype=torch.int8)
-    B = torch.randint(-127, 128, (N, K), device=device, dtype=torch.int8)
-
-    num_k_groups = (K + block_k - 1) // block_k
-    num_n_groups = (N + block_n - 1) // block_n
-    As = torch.rand((M, num_k_groups), device=device, dtype=torch.float32) * 0.01
-    Bs = (
-        torch.rand((num_n_groups, num_k_groups), device=device, dtype=torch.float32)
-        * 0.01
-    )
+    A, B, As, Bs = _make_inputs(M, N, K, torch.int8, block_size)
 
     ref_out = _reference(A, B, As, Bs, block_n, block_k).to(output_dtype)
     res_out = flaggems_vllm.w8a8_block_matmul(
@@ -115,10 +126,7 @@ def test_w8a8_block_int8_empty_shapes():
 def test_w8a8_block_int8_block_k256_scales():
     m, n, k = 7, 129, 512
     block_n, block_k = 128, 256
-    a = torch.randint(-127, 128, (m, k), device="cuda", dtype=torch.int8)
-    b = torch.randint(-127, 128, (n, k), device="cuda", dtype=torch.int8)
-    a_scale = torch.rand((m, 2), device="cuda", dtype=torch.float32) * 0.01
-    b_scale = torch.rand((2, 2), device="cuda", dtype=torch.float32) * 0.01
+    a, b, a_scale, b_scale = _make_inputs(m, n, k, torch.int8, [block_n, block_k])
     output = flaggems_vllm.w8a8_block_matmul(
         a, b, a_scale, b_scale, [block_n, block_k], torch.float32
     )
@@ -169,11 +177,7 @@ def test_w8a8_block_int8_splitk_tails(splits, output_dtype, group_n):
     )
     m, n, k = 7, 129, 4225
     group_k = 128
-    a = torch.randint(-127, 128, (m, k), device="cuda", dtype=torch.int8)
-    b = torch.randint(-127, 128, (n, k), device="cuda", dtype=torch.int8)
-    groups = (k + group_k - 1) // group_k
-    a_scale = torch.rand((m, groups), device="cuda") * 0.01
-    b_scale = torch.rand(((n + group_n - 1) // group_n, groups), device="cuda") * 0.01
+    a, b, a_scale, b_scale = _make_inputs(m, n, k, torch.int8, [group_n, group_k])
     workspace = torch.full(
         (backend._MAX_SPLITS.value * m * n + 1,), float("nan"), device="cuda"
     )
@@ -211,11 +215,6 @@ def test_w8a8_block_int8_splitk_tails(splits, output_dtype, group_n):
     )
 
 
-if QUICK_MODE:
-    FLOAT_DTYPES = [torch.float32]
-else:
-    FLOAT_DTYPES = utils.FLOAT_DTYPES
-
 FP8_MNK_SHAPES = [
     (128, 256, 512),
     (64, 128, 128),
@@ -250,21 +249,11 @@ def test_w8a8_block_matmul_fp8(M, N, K):
         else:
             dtype = torch.float32
 
-    device = flaggems_vllm.device
-    block_n = 128
-    block_k = 128
+    block_n, block_k = 128, 128
     block_size = [block_n, block_k]
-
-    A = torch.randn((M, K), device=device).to(dtype)
-    B = torch.randn((N, K), device=device).to(dtype)
-
-    num_k_groups = (K + block_k - 1) // block_k
-    num_n_groups = (N + block_n - 1) // block_n
-
-    As = (0.01 * torch.rand(M, num_k_groups, device=device) + 0.005).to(torch.float32)
-    Bs = (0.01 * torch.rand(num_n_groups, num_k_groups, device=device) + 0.005).to(
-        torch.float32
-    )
+    A, B, As, Bs = _make_inputs(M, N, K, dtype, block_size, scale_offset=0.005)
+    num_k_groups = As.shape[1]
+    num_n_groups = Bs.shape[0]
 
     A_ref = A.to(torch.float32)
     B_ref = B.to(torch.float32)
