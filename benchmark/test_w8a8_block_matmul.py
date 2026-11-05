@@ -150,26 +150,21 @@ def test_perf_w8a8_block_matmul(monkeypatch):
 
         original_get_configs = int8_utils.get_w8a8_block_int8_configs
 
-        def get_configs(N, K, block_n, block_k):
-            configs = original_get_configs(N, K, block_n, block_k)
-            # The default tile exceeds C550's private-memory limit on these shapes.
-            if configs is None and (N, K, block_n, block_k) in (
-                (7748, 3884, 128, 128),
-                (7168, 3884, 128, 128),
-            ):
-                return {
-                    83: {
-                        "BLOCK_SIZE_M": 32,
-                        "BLOCK_SIZE_N": 64,
-                        "BLOCK_SIZE_K": 128,
-                        "GROUP_SIZE_M": 32,
-                        "num_warps": 4,
-                        "num_stages": 1,
-                    }
+        monkeypatch.setattr(
+            int8_utils,
+            "get_w8a8_block_int8_configs",
+            lambda *args: original_get_configs(*args)
+            or {
+                1: {
+                    "BLOCK_SIZE_M": 32,
+                    "BLOCK_SIZE_N": 64,
+                    "BLOCK_SIZE_K": 128,
+                    "GROUP_SIZE_M": 32,
+                    "num_warps": 4,
+                    "num_stages": 1,
                 }
-            return configs
-
-        monkeypatch.setattr(int8_utils, "get_w8a8_block_int8_configs", get_configs)
+            },
+        )
 
     bench = W8A8BlockMatmulBenchmark(
         op_name="w8a8_block_matmul",
