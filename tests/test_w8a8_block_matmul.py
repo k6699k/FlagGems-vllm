@@ -21,7 +21,7 @@ import flaggems_vllm
 
 from . import accuracy_utils as utils
 
-IS_INT8 = flaggems_vllm.vendor_name == "thead"
+IS_INT8 = flaggems_vllm.vendor_name in ("thead", "metax", "hygon")
 MNK_SHAPES = [
     (1, 65, 130),
     (7, 129, 257),
@@ -91,7 +91,7 @@ def _reference(a, b, a_scale, b_scale, block_n, block_k):
 
 @pytest.mark.w8a8_block_matmul
 @pytest.mark.skipif(
-    flaggems_vllm.vendor_name not in ("thead", "nvidia", "mthreads"),
+    flaggems_vllm.vendor_name not in ("thead", "metax", "hygon", "nvidia", "mthreads"),
     reason="No W8A8 block matmul backend",
 )
 @pytest.mark.parametrize("M,N,K", MNK_SHAPES)

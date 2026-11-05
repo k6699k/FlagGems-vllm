@@ -41,8 +41,8 @@ from flaggems_vllm.runtime.backend._metax.ops.scaled_int8_quant import scaled_in
 from flaggems_vllm.runtime.backend._metax.ops.w8a8_block_int8_bmm import (
     w8a8_block_int8_bmm,
 )
-from flaggems_vllm.runtime.backend._metax.ops.w8a8_block_int8_matmul import (
-    w8a8_block_int8_matmul,
+from flaggems_vllm.runtime.backend._metax.ops.w8a8_block_matmul import (
+    w8a8_block_matmul,
 )
 from flaggems_vllm.utils import triton_version_utils
 
@@ -51,6 +51,8 @@ if triton_version_utils.has_triton_tle():
     from flaggems_vllm.runtime.backend._metax.ops.persistent_topk import persistent_topk
 else:
     from flaggems_vllm.ops.persistent_topk import persistent_topk
+
+w8a8_block_int8_matmul = w8a8_block_matmul
 
 __all__ = [
     "fused_experts_impl",
@@ -70,4 +72,5 @@ __all__ = [
     "SUPPORTED_FP8_DTYPE",
     "w8a8_block_int8_bmm",
     "w8a8_block_int8_matmul",
+    "w8a8_block_matmul",
 ]
